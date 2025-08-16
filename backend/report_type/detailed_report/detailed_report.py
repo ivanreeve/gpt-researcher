@@ -1,8 +1,38 @@
 import asyncio
+import json
 from typing import List, Dict, Set, Optional, Any
 from fastapi import WebSocket
 
 from gpt_researcher import GPTResearcher
+
+
+# --- helper: normalize context items and dedupe while preserving order ---
+def _normalize_and_dedupe_context(ctx: List[Any]) -> List[str]:
+    """
+    Return unique context entries as strings, order-preserving.
+    Dicts are converted by preferring textual fields and falling back
+    to a stable JSON dump.
+    """
+    preferred_keys = ("content", "text", "summary", "body", "title")
+    seen: Set[str] = set()
+    out: List[str] = []
+    for item in ctx or []:
+        if isinstance(item, dict):
+            text = None
+            for k in preferred_keys:
+                if item.get(k):
+                    text = item[k]
+                    break
+            if text is None:
+                # Stable representation if no obvious text field
+                text = json.dumps(item, sort_keys=True, ensure_ascii=False)
+        else:
+            text = str(item)
+        if text not in seen:
+            seen.add(text)
+            out.append(text)
+    return out
+# --- end helper ---
 
 
 class DetailedReport:
@@ -121,7 +151,8 @@ class DetailedReport:
             source_urls=self.source_urls
         )
 
-        subtopic_assistant.context = list(set(self.global_context))
+        # FIX: avoid list(set(...)) on possibly-dict items
+        subtopic_assistant.context = _normalize_and_dedupe_context(self.global_context)
         await subtopic_assistant.conduct_research()
 
         draft_section_titles = await subtopic_assistant.get_draft_section_titles(current_subtopic_task)
@@ -140,7 +171,8 @@ class DetailedReport:
         subtopic_report = await subtopic_assistant.write_report(self.existing_headers, relevant_contents)
 
         self.global_written_sections.extend(self.gpt_researcher.extract_sections(subtopic_report))
-        self.global_context = list(set(subtopic_assistant.context))
+        # FIX: avoid list(set(...)) on possibly-dict items
+        self.global_context = _normalize_and_dedupe_context(subtopic_assistant.context)
         self.global_urls.update(subtopic_assistant.visited_urls)
 
         self.existing_headers.append({
