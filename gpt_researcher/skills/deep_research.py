@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Iterable
 import asyncio
 import logging
 import time
@@ -14,25 +14,80 @@ logger = logging.getLogger(__name__)
 # Maximum words allowed in context (25k words for safety margin)
 MAX_CONTEXT_WORDS = 25000
 
-def count_words(text: str) -> int:
-    """Count words in a text string"""
-    return len(text.split())
 
-def trim_context_to_word_limit(context_list: List[str], max_words: int = MAX_CONTEXT_WORDS) -> List[str]:
-    """Trim context list to stay within word limit while preserving most recent/relevant items"""
+# ---- Robust text utilities (flatten + normalize) ----
+_TEXT_KEYS = ("title", "content", "text", "snippet", "summary", "body", "description")
+
+def _is_iterable_but_not_str(x: Any) -> bool:
+    if isinstance(x, (str, bytes)) or x is None:
+        return False
+    try:
+        iter(x)
+        return True
+    except TypeError:
+        return False
+
+def to_text(x: Any) -> str:
+    """Return a single string for any text-like object (str/list/dict/etc)."""
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        parts = [str(x.get(k, "")) for k in _TEXT_KEYS if x.get(k)]
+        return " ".join(p for p in parts if p) or str(x)
+    if _is_iterable_but_not_str(x):
+        return " ".join(to_text(i) for i in x)
+    return str(x)
+
+def flatten_texts(xs: Any) -> List[str]:
+    """Flatten arbitrarily nested text-like structures into list[str]."""
+    out: List[str] = []
+    def visit(v: Any):
+        if v is None:
+            return
+        if isinstance(v, str):
+            if v:
+                out.append(v)
+            return
+        if isinstance(v, dict):
+            for k in _TEXT_KEYS:
+                if v.get(k):
+                    visit(v[k])
+            return
+        if _is_iterable_but_not_str(v):
+            for item in v:
+                visit(item)
+            return
+        out.append(str(v))
+    visit(xs)
+    return out
+
+def safe_join(parts: Any, sep: str = " ") -> str:
+    """Join any text-like sequence safely (no TypeError on lists/dicts)."""
+    return sep.join(flatten_texts(parts))
+
+def count_words(text: Any) -> int:
+    """Count words in any text-like object safely."""
+    return len(to_text(text).split())
+
+
+def trim_context_to_word_limit(context_list: List[Any], max_words: int = MAX_CONTEXT_WORDS) -> List[str]:
+    """Trim context list to stay within word limit while preserving most recent/relevant items."""
     total_words = 0
-    trimmed_context = []
+    trimmed_context: List[str] = []
 
     # Process in reverse to keep most recent items
     for item in reversed(context_list):
         words = count_words(item)
         if total_words + words <= max_words:
-            trimmed_context.insert(0, item)  # Insert at start to maintain original order
+            trimmed_context.insert(0, to_text(item))  # Insert at start to maintain original order
             total_words += words
         else:
             break
 
     return trimmed_context
+
 
 class ResearchProgress:
     def __init__(self, total_depth: int, total_breadth: int):
@@ -149,9 +204,9 @@ Format each question on a new line starting with 'Question: '"""}
         )
 
         lines = response.split('\n')
-        learnings = []
-        questions = []
-        citations = {}
+        learnings: List[str] = []
+        questions: List[str] = []
+        citations: Dict[str, str] = {}
 
         for line in lines:
             line = line.strip()
@@ -213,7 +268,7 @@ Format each question on a new line starting with 'Question: '"""}
         all_learnings = learnings.copy()
         all_citations = citations.copy()
         all_visited_urls = visited_urls.copy()
-        all_context = []
+        all_context: List[str] = []
         all_sources = []
 
         # Process queries with concurrency limit
@@ -263,7 +318,8 @@ Format each question on a new line starting with 'Question: '"""}
                         'followUpQuestions': results['followUpQuestions'],
                         'researchGoal': serp_query['researchGoal'],
                         'citations': results['citations'],
-                        'context': context if context else "",
+                        # Normalize here to avoid passing mixed types downstream
+                        'context': to_text(context) if context else "",
                         'sources': sources if sources else []
                     }
 
@@ -297,10 +353,10 @@ Format each question on a new line starting with 'Question: '"""}
                 new_depth = depth - 1
                 progress.current_depth += 1
 
-                # Create next query from research goal and follow-up questions
+                # Create next query from research goal and follow-up questions (safe join)
                 next_query = f"""
                 Previous research goal: {result['researchGoal']}
-                Follow-up questions: {' '.join(result['followUpQuestions'])}
+                Follow-up questions: {safe_join(result['followUpQuestions'])}
                 """
 
                 # Recursive research
@@ -371,7 +427,7 @@ Format each question on a new line starting with 'Question: '"""}
             })
 
         # Prepare context with citations
-        context_with_citations = []
+        context_with_citations: List[str] = []
         for learning in results['learnings']:
             citation = results['citations'].get(learning, '')
             if citation:
@@ -387,7 +443,7 @@ Format each question on a new line starting with 'Question: '"""}
         final_context = trim_context_to_word_limit(context_with_citations)
         
         # Set enhanced context and visited URLs
-        self.researcher.context = "\n".join(final_context)
+        self.researcher.context = safe_join(final_context, sep="\n")
         self.researcher.visited_urls = results['visited_urls']
 
         # Set research sources
